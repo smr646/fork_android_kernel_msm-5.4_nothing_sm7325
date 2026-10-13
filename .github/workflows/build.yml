@@ -1,0 +1,236 @@
+name: Build Clean Spacewar Kernel (NothingOSS Original)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish GitHub Release'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  TZ: Asia/Jakarta
+  ARCH: arm64
+  SUBARCH: arm64
+  DEFCONFIG: vendor/lahaina-qgki_defconfig
+  PROVEN_TEMPLATE_URL: 'https://github.com/smr646/kernel-nothing-phone-1-custom-config/releases/download/touchfix-v8/Calamity-Custom-KSU-Full.img'
+
+jobs:
+  build:
+    name: Build Kernel & Repack boot.img
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      # =========================================================================
+      # 1. INITIALIZE LOGGING & WORKSPACE
+      # =========================================================================
+      - name: Initialize Workspace & Logging
+        id: init
+        run: |
+          mkdir -p "${RUNNER_TEMP}/logs" "${RUNNER_TEMP}/artifacts"
+          echo "Build started at $(date -u)" | tee "${RUNNER_TEMP}/logs/build_start.txt"
+          echo "RUNNER_LOG_DIR=${RUNNER_TEMP}/logs" >> "$GITHUB_ENV"
+          echo "RUNNER_ART_DIR=${RUNNER_TEMP}/artifacts" >> "$GITHUB_ENV"
+
+      # =========================================================================
+      # 2. CHECKOUT REPOSITORY
+      # =========================================================================
+      - name: Checkout Repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # =========================================================================
+      # 3. INSTALL BUILD DEPENDENCIES
+      # =========================================================================
+      - name: Install Build Dependencies
+        id: deps
+        run: |
+          echo "=== Installing dependencies ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc flex bison libssl-dev libelf-dev git wget \
+            ccache curl python3 cpio lz4 zstd openssl perl unzip zip file
+          echo "Dependencies installed successfully."
+
+      # =========================================================================
+      # 4. DOWNLOAD PROTON CLANG TOOLCHAIN
+      # =========================================================================
+      - name: Download Proton Clang Toolchain
+        id: toolchain
+        run: |
+          echo "=== Downloading Proton Clang ==="
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "${RUNNER_TEMP}/toolchain-clang"
+          echo "${RUNNER_TEMP}/toolchain-clang/bin" >> "$GITHUB_PATH"
+          export PATH="${RUNNER_TEMP}/toolchain-clang/bin:${PATH}"
+          clang --version
+
+      # =========================================================================
+      # 5. CONFIGURE KERNEL (NOTHINGOSS BASE)
+      # =========================================================================
+      - name: Configure Kernel (vendor/lahaina-qgki_defconfig)
+        id: config
+        run: |
+          echo "=== Generating vendor/lahaina-qgki_defconfig ==="
+          bash scripts/gki/generate_defconfig.sh lahaina-qgki_defconfig
+
+          echo "=== Applying defconfig ==="
+          make ARCH=arm64 SUBARCH=arm64 \
+            CC=clang \
+            HOSTCC="gcc -B/usr/bin/" \
+            HOSTCXX="g++ -B/usr/bin/" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=0 \
+            vendor/lahaina-qgki_defconfig
+
+          make ARCH=arm64 SUBARCH=arm64 \
+            CC=clang \
+            HOSTCC="gcc -B/usr/bin/" \
+            HOSTCXX="g++ -B/usr/bin/" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=0 \
+            olddefconfig
+
+          echo "=== Verifying Touchscreen Config ==="
+          grep "CONFIG_TOUCHSCREEN_FTS" .config
+          test "$(grep "^CONFIG_TOUCHSCREEN_FTS=" .config)" = "CONFIG_TOUCHSCREEN_FTS=m"
+          cp .config "${RUNNER_ART_DIR}/kernel.config"
+
+      # =========================================================================
+      # 6. COMPILE KERNEL IMAGE & MODULES
+      # =========================================================================
+      - name: Compile Kernel Image & Modules
+        id: compile
+        run: |
+          echo "=== Fixing subsystem trace path in walt, hid, stability and soc/qcom Makefiles ==="
+          grep -q "CFLAGS_trace.o" kernel/sched/walt/Makefile || echo "CFLAGS_trace.o := -I\$(src)" >> kernel/sched/walt/Makefile
+          grep -q "CFLAGS_hid-trace.o" drivers/hid/Makefile || echo "CFLAGS_hid-trace.o := -I\$(src)" >> drivers/hid/Makefile
+          grep -q "CFLAGS_nothing_writeback_kmsg.o" drivers/nothing_stability/Makefile || echo "CFLAGS_nothing_writeback_kmsg.o := -Wno-strict-prototypes" >> drivers/nothing_stability/Makefile
+          grep -q "ccflags-y += -I\$(src)" drivers/soc/qcom/Makefile || echo "ccflags-y += -I\$(src)" >> drivers/soc/qcom/Makefile
+
+          echo "=== Building Kernel Image on $(nproc) cores ==="
+          make ARCH=arm64 SUBARCH=arm64 \
+            CC=clang \
+            HOSTCC="gcc -B/usr/bin/" \
+            HOSTCXX="g++ -B/usr/bin/" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=0 \
+            -j$(nproc) Image 2>&1 | tee "${RUNNER_LOG_DIR}/compile_image.log"
+
+          echo "=== Verifying Kernel Image ==="
+          ls -lh arch/arm64/boot/Image
+          test -f arch/arm64/boot/Image
+          cp arch/arm64/boot/Image "${RUNNER_ART_DIR}/Image"
+
+          echo "=== Building Touchscreen Module (fts_tp.ko) ==="
+          make ARCH=arm64 SUBARCH=arm64 \
+            CC=clang \
+            HOSTCC="gcc -B/usr/bin/" \
+            HOSTCXX="g++ -B/usr/bin/" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=0 \
+            -j$(nproc) M=drivers/input/touchscreen/focaltech_touch modules 2>&1 | tee "${RUNNER_LOG_DIR}/compile_modules.log"
+
+          echo "=== Verifying fts_tp.ko ==="
+          ls -lh drivers/input/touchscreen/focaltech_touch/fts_tp.ko
+          test -f drivers/input/touchscreen/focaltech_touch/fts_tp.ko
+          cp drivers/input/touchscreen/focaltech_touch/fts_tp.ko "${RUNNER_ART_DIR}/fts_tp.ko"
+
+      # =========================================================================
+      # 7. DOWNLOAD PROVEN BOOT TEMPLATE & REPACK (PRESERVE AVB)
+      # =========================================================================
+      - name: Download Template & Repack Boot Image (Preserve AVB)
+        id: repack
+        run: |
+          echo "=== Downloading Proven Template boot.img ==="
+          curl -fL --retry 3 "${PROVEN_TEMPLATE_URL}" -o "${RUNNER_TEMP}/proven-template.img"
+          ls -lh "${RUNNER_TEMP}/proven-template.img"
+
+          echo "=== Repacking boot.img preserving AVB Offset 0x4911000 ==="
+          python3 scripts/repack-boot.py \
+            --template "${RUNNER_TEMP}/proven-template.img" \
+            --kernel arch/arm64/boot/Image \
+            --output "${RUNNER_ART_DIR}/spacewar-clean-boot.img" \
+            --avbtool scripts/avbtool.py 2>&1 | tee "${RUNNER_LOG_DIR}/repack.log"
+
+      # =========================================================================
+      # 8. VERIFY AVB OFFSET & CHECKSUMS
+      # =========================================================================
+      - name: Verify AVB Offset & Checksums
+        id: verify
+        run: |
+          echo "=== Verifying Repacked boot.img AVB Offset & Hash Footer ==="
+          python3 - << 'EOF'
+          import sys, os
+          path = os.environ["RUNNER_ART_DIR"] + "/spacewar-clean-boot.img"
+          size = os.path.getsize(path)
+          assert size == 100663296, f"Expected size 100663296, got {size}"
+
+          with open(path, "rb") as f:
+              f.seek(0x4911000)
+              avb0 = f.read(4)
+              f.seek(size - 64)
+              avbf = f.read(4)
+
+          print(f"File size: {size} bytes")
+          print(f"AVB Descriptor Magic at 0x4911000: {avb0}")
+          print(f"AVB Footer Magic at 0x{size - 64:x}: {avbf}")
+          assert avb0 == b"AVB0", f"Invalid AVB0 magic: {avb0}"
+          assert avbf == b"AVBf", f"Invalid AVBf magic: {avbf}"
+          print("✅ AVB OFFSET 0x4911000 & FOOTER STRUCTURE VERIFIED!")
+          EOF
+
+          cd "${RUNNER_ART_DIR}"
+          sha256sum spacewar-clean-boot.img Image fts_tp.ko > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # =========================================================================
+      # 9. UPLOAD ARTIFACTS
+      # =========================================================================
+      - name: Upload Build Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spacewar-clean-boot-build-${{ github.run_number }}
+          path: ${{ runner.temp }}/artifacts/*
+          if-no-files-found: error
+
+      # =========================================================================
+      # 10. PUBLISH GITHUB RELEASE
+      # =========================================================================
+      - name: Publish GitHub Release (clean-v1)
+        if: success() && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: clean-v1
+          name: "Clean Nothing Phone (1) Kernel Minimal (clean-v1)"
+          body: |
+            ### Clean Spacewar Kernel (Minimal NothingOSS)
+            - **Device:** Nothing Phone (1) (`spacewar` / `A063`)
+            - **OS Base:** Nothing OS 3.2 (Android 15)
+            - **Source:** Original NothingOSS (`android_kernel_msm-5.4_nothing_sm7325` branch `sm7325/v/mr`)
+            - **Modifications:** NONE (Clean stock minimal build)
+            - **Touchscreen Module:** FocalTech `fts_tp.ko` (`CONFIG_TOUCHSCREEN_FTS=m`)
+            - **AVB Structure:** Exact 0x4911000 offset preserved with verified hash footer
+            - **Ramdisk:** Untouched proven ramdisk (no injected modules)
+          files: |
+            ${{ runner.temp }}/artifacts/spacewar-clean-boot.img
+            ${{ runner.temp }}/artifacts/Image
+            ${{ runner.temp }}/artifacts/fts_tp.ko
+            ${{ runner.temp }}/artifacts/SHA256SUMS.txt
+            ${{ runner.temp }}/artifacts/kernel.config
+          prerelease: false
