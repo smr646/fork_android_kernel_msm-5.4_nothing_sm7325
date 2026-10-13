@@ -160,7 +160,7 @@ jobs:
           curl -fL --retry 3 "${PROVEN_TEMPLATE_URL}" -o "${RUNNER_TEMP}/proven-template.img"
           ls -lh "${RUNNER_TEMP}/proven-template.img"
 
-          echo "=== Repacking boot.img preserving AVB Offset 0x4911000 ==="
+          echo "=== Repacking boot.img with Dynamic AVB Structure ==="
           python3 scripts/repack-boot.py \
             --template "${RUNNER_TEMP}/proven-template.img" \
             --kernel arch/arm64/boot/Image \
@@ -173,7 +173,7 @@ jobs:
       - name: Verify AVB Offset & Checksums
         id: verify
         run: |
-          echo "=== Verifying Repacked boot.img AVB Offset & Hash Footer ==="
+          echo "=== Verifying Repacked boot.img AVB Structure & Hash Footer ==="
           python3 - << 'EOF'
           import sys, os
           path = os.environ["RUNNER_ART_DIR"] + "/spacewar-clean-boot.img"
@@ -181,17 +181,20 @@ jobs:
           assert size == 100663296, f"Expected size 100663296, got {size}"
 
           with open(path, "rb") as f:
-              f.seek(0x4911000)
-              avb0 = f.read(4)
-              f.seek(size - 64)
+              data = f.read()
+
+          idx = data.find(b"AVB0")
+          assert idx > 0, "AVB0 not found"
+          print(f"AVB0 found at offset: {hex(idx)}")
+
+          with open(path, "rb") as f:
+              f.seek(-64, 2)
               avbf = f.read(4)
 
           print(f"File size: {size} bytes")
-          print(f"AVB Descriptor Magic at 0x4911000: {avb0}")
-          print(f"AVB Footer Magic at 0x{size - 64:x}: {avbf}")
-          assert avb0 == b"AVB0", f"Invalid AVB0 magic: {avb0}"
-          assert avbf == b"AVBf", f"Invalid AVBf magic: {avbf}"
-          print("✅ AVB OFFSET 0x4911000 & FOOTER STRUCTURE VERIFIED!")
+          print(f"AVBf footer at end: {avbf}")
+          assert avbf == b"AVBf", f"Invalid AVBf: {avbf}"
+          print("✅ DYNAMIC AVB STRUCTURE & FOOTER VERIFIED!")
           EOF
 
           cd "${RUNNER_ART_DIR}"

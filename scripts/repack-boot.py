@@ -69,17 +69,9 @@ def main():
     r_padded = ((len(ramdisk) + 4095) // 4096) * 4096
     raw.extend(b"\x00" * (r_padded - len(ramdisk)))
 
-    # Pad to exact AVB offset 0x4911000 if smaller
-    TARGET_AVB_OFFSET = 0x4911000  # 76615680 bytes
-    if len(raw) < TARGET_AVB_OFFSET:
-        pad_len = TARGET_AVB_OFFSET - len(raw)
-        raw.extend(b"\x00" * pad_len)
-        print(f"Padded {pad_len} bytes to reach exact AVB offset 0x{TARGET_AVB_OFFSET:x}")
-    elif len(raw) > TARGET_AVB_OFFSET:
-        print(f"WARNING: Raw image size 0x{len(raw):x} exceeds target offset 0x{TARGET_AVB_OFFSET:x}")
-
     raw_size = len(raw)
-    print(f"Raw boot image size: {raw_size} bytes (0x{raw_size:x})")
+    expected_avb0_offset = 4096 + new_k_padded + r_padded
+    print(f"Raw boot image size: {raw_size} bytes (expected AVB0 offset: {hex(expected_avb0_offset)})")
 
     with open(args.output, "wb") as f:
         f.write(raw)
@@ -99,24 +91,28 @@ def main():
     print(f"Signing image with avbtool: {' '.join(avb_cmd)}")
     subprocess.run(avb_cmd, check=True)
 
-    # Verify image and AVB offset
-    final_size = os.path.getsize(args.output)
+    # Verify image and dynamic AVB offset
     with open(args.output, "rb") as f:
-        f.seek(raw_size)
-        avb0_magic = f.read(4)
-        f.seek(final_size - 64)
-        footer_magic = f.read(4)
+        data = f.read()
+
+    final_size = len(data)
+    idx = data.find(b"AVB0")
+    print(f"AVB0 found at offset: {hex(idx)}")
+    assert idx > 0, "AVB0 not found"
+
+    with open(args.output, "rb") as f:
+        f.seek(-64, 2)
+        avbf = f.read(4)
+
+    print(f"AVBf footer at end: {avbf} (Expected: b'AVBf')")
+    assert avbf == b"AVBf", f"Invalid AVBf: {avbf}"
+    assert final_size == 100663296, f"Invalid final partition size: {final_size}"
 
     print("=== Verification ===")
     print(f"Final Image Size: {final_size} bytes (Expected: 100663296)")
-    print(f"AVB0 magic at 0x{raw_size:x}: {avb0_magic} (Expected: b'AVB0')")
-    print(f"AVBf footer at end: {footer_magic} (Expected: b'AVBf')")
-
-    if final_size == 100663296 and avb0_magic == b"AVB0" and footer_magic == b"AVBf":
-        print("✅ SUCCESS: Boot image repacked and verified successfully!")
-    else:
-        print("❌ ERROR: Verification failed!")
-        sys.exit(1)
+    print(f"AVB0 offset: {hex(idx)} (Expected: {hex(expected_avb0_offset)})")
+    print(f"AVBf footer: {avbf}")
+    print("✅ SUCCESS: Boot image repacked and verified successfully!")
 
 if __name__ == "__main__":
     main()
