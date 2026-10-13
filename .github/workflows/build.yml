@@ -138,9 +138,11 @@ jobs:
           test -f arch/arm64/boot/Image
           cp arch/arm64/boot/Image "${RUNNER_ART_DIR}/Image"
 
-          echo "=== Verifying Built-in Touch Driver Object (fts_tp.o) ==="
-          ls -lh drivers/input/touchscreen/focaltech_touch/fts_tp.o
-          test -f drivers/input/touchscreen/focaltech_touch/fts_tp.o
+          echo "=== Verifying Built-in Touch Driver in Kernel Image ==="
+          test -f drivers/input/touchscreen/focaltech_touch/focaltech_core.o
+          ls -lh drivers/input/touchscreen/focaltech_touch/focaltech_core.o
+          ls -lh drivers/input/touchscreen/focaltech_touch/built-in.a
+          llvm-nm vmlinux | grep -i "fts_ts_probe"
 
       # =========================================================================
       # 7. DOWNLOAD PROVEN BOOT TEMPLATE & REPACK (PRESERVE AVB)
