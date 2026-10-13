@@ -103,15 +103,18 @@ jobs:
             LLVM=1 LLVM_IAS=0 \
             olddefconfig
 
-          echo "=== Verifying Touchscreen Config ==="
+          echo "=== Verifying Touchscreen Config (All Built-in) ==="
           grep "CONFIG_TOUCHSCREEN_FTS" .config
-          test "$(grep "^CONFIG_TOUCHSCREEN_FTS=" .config)" = "CONFIG_TOUCHSCREEN_FTS=m"
+          test "$(grep "^CONFIG_TOUCHSCREEN_FTS=" .config)" = "CONFIG_TOUCHSCREEN_FTS=y"
+          test "$(grep "^CONFIG_TOUCHSCREEN_NT36XXX=" .config)" = "CONFIG_TOUCHSCREEN_NT36XXX=y"
+          test "$(grep "^CONFIG_TOUCHSCREEN_ST=" .config)" = "CONFIG_TOUCHSCREEN_ST=y"
+          test "$(grep "^CONFIG_TOUCHSCREEN_SYNAPTICS_DSX=" .config)" = "CONFIG_TOUCHSCREEN_SYNAPTICS_DSX=y"
           cp .config "${RUNNER_ART_DIR}/kernel.config"
 
       # =========================================================================
-      # 6. COMPILE KERNEL IMAGE & MODULES
+      # 6. COMPILE KERNEL IMAGE & BUILT-IN DRIVERS
       # =========================================================================
-      - name: Compile Kernel Image & Modules
+      - name: Compile Kernel Image & Built-in Drivers
         id: compile
         run: |
           echo "=== Fixing subsystem trace path in walt, hid, stability and soc/qcom Makefiles ==="
@@ -135,20 +138,9 @@ jobs:
           test -f arch/arm64/boot/Image
           cp arch/arm64/boot/Image "${RUNNER_ART_DIR}/Image"
 
-          echo "=== Building Touchscreen Module (fts_tp.ko) ==="
-          make ARCH=arm64 SUBARCH=arm64 \
-            CC=clang \
-            HOSTCC="gcc -B/usr/bin/" \
-            HOSTCXX="g++ -B/usr/bin/" \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LLVM=1 LLVM_IAS=0 \
-            -j$(nproc) M=drivers/input/touchscreen/focaltech_touch modules 2>&1 | tee "${RUNNER_LOG_DIR}/compile_modules.log"
-
-          echo "=== Verifying fts_tp.ko ==="
-          ls -lh drivers/input/touchscreen/focaltech_touch/fts_tp.ko
-          test -f drivers/input/touchscreen/focaltech_touch/fts_tp.ko
-          cp drivers/input/touchscreen/focaltech_touch/fts_tp.ko "${RUNNER_ART_DIR}/fts_tp.ko"
+          echo "=== Verifying Built-in Touch Driver Object (fts_tp.o) ==="
+          ls -lh drivers/input/touchscreen/focaltech_touch/fts_tp.o
+          test -f drivers/input/touchscreen/focaltech_touch/fts_tp.o
 
       # =========================================================================
       # 7. DOWNLOAD PROVEN BOOT TEMPLATE & REPACK (PRESERVE AVB)
@@ -198,7 +190,7 @@ jobs:
           EOF
 
           cd "${RUNNER_ART_DIR}"
-          sha256sum spacewar-clean-boot.img Image fts_tp.ko > SHA256SUMS.txt
+          sha256sum spacewar-clean-boot.img Image > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       # =========================================================================
@@ -213,27 +205,25 @@ jobs:
           if-no-files-found: error
 
       # =========================================================================
-      # 10. PUBLISH GITHUB RELEASE
+      # 10. PUBLISH TEST PRE-RELEASE
       # =========================================================================
-      - name: Publish GitHub Release (clean-v1)
+      - name: Publish GitHub Release (clean-test-v1)
         if: success() && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: clean-v1
-          name: "Clean Nothing Phone (1) Kernel Minimal (clean-v1)"
+          tag_name: clean-test-v1
+          name: "Clean Nothing Phone (1) Kernel Test (clean-test-v1)"
           body: |
-            ### Clean Spacewar Kernel (Minimal NothingOSS)
+            ### Clean Spacewar Kernel Test (Built-in Touch FTS=y)
             - **Device:** Nothing Phone (1) (`spacewar` / `A063`)
             - **OS Base:** Nothing OS 3.2 (Android 15)
             - **Source:** Original NothingOSS (`android_kernel_msm-5.4_nothing_sm7325` branch `sm7325/v/mr`)
-            - **Modifications:** NONE (Clean stock minimal build)
-            - **Touchscreen Module:** FocalTech `fts_tp.ko` (`CONFIG_TOUCHSCREEN_FTS=m`)
-            - **AVB Structure:** Exact 0x4911000 offset preserved with verified hash footer
-            - **Ramdisk:** Untouched proven ramdisk (no injected modules)
+            - **Modifications:** Built-in touch drivers (`CONFIG_TOUCHSCREEN_FTS=y`, `NT36XXX=y`, `ST=y`, `SYNAPTICS_DSX=y`)
+            - **AVB Structure:** Dynamic AVB0 header with AVBf hash footer verified
+            - **Ramdisk:** Untouched proven stock ramdisk (no injected modules)
           files: |
             ${{ runner.temp }}/artifacts/spacewar-clean-boot.img
             ${{ runner.temp }}/artifacts/Image
-            ${{ runner.temp }}/artifacts/fts_tp.ko
             ${{ runner.temp }}/artifacts/SHA256SUMS.txt
             ${{ runner.temp }}/artifacts/kernel.config
-          prerelease: false
+          prerelease: true
